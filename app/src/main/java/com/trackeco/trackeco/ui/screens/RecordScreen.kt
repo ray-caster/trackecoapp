@@ -106,9 +106,6 @@ fun RecordScreen(
 
     // Upload function
     suspend fun uploadVideoToBackend(context: Context, videoUri: Uri, userId: String) {
-        var retryCount = 0
-        val maxRetries = 3
-        
         try {
             isUploading = true
 
@@ -121,7 +118,11 @@ fun RecordScreen(
                 }
             }
 
-            while (retryCount < maxRetries) {
+            var retryCount = 0
+            val maxRetries = 3
+            var shouldRetry = true
+            
+            while (shouldRetry && retryCount < maxRetries) {
                 try {
                     // Create multipart request
                     val requestFile = file.asRequestBody("video/mp4".toMediaTypeOrNull())
@@ -138,6 +139,7 @@ fun RecordScreen(
                         video = videoPart
                     )
 
+                    // Success - handle response
                     if (response["success"] == true) {
                         val pointsEarned = response["points_earned"] ?: 0
                         val objectType = response["object_type"] ?: "unknown"
@@ -147,49 +149,96 @@ fun RecordScreen(
                             Toast.LENGTH_LONG
                         ).show()
                         navController.navigate("home")
-                        break // Success
                     } else {
                         val message = response["message"] as? String ?: "Video analysis failed"
                         Toast.makeText(context, message, Toast.LENGTH_LONG).show()
-                        break // Don't retry on analysis failure
                     }
+                    shouldRetry = false // Success or logical failure - don't retry
 
                 } catch (e: retrofit2.HttpException) {
-                    // NEVER retry on HTTP errors
+                    // HTTP errors are server responses - NEVER retry these
+                    shouldRetry = false
                     when (e.code()) {
-                        400 -> Toast.makeText(context, "Invalid video format or missing data", Toast.LENGTH_LONG).show()
-                        401 -> Toast.makeText(context, "Authentication failed. Please log in again.", Toast.LENGTH_LONG).show()
-                        413 -> Toast.makeText(context, "Video file too large. Please use a smaller video.", Toast.LENGTH_LONG).show()
-                        else -> Toast.makeText(context, "Upload failed with error ${e.code()}", Toast.LENGTH_LONG).show()
+                        400 -> {
+                            Toast.makeText(context, "Wrong video format. Please record a new video.", Toast.LENGTH_LONG).show()
+                        }
+                        401 -> {
+                            Toast.makeText(context, "Authentication failed. Please log in again.", Toast.LENGTH_LONG).show()
+                        }
+                        404 -> {
+                            Toast.makeText(context, "Upload endpoint not found. Please contact support.", Toast.LENGTH_LONG).show()
+                        }
+                        413 -> {
+                            Toast.makeText(context, "Video file too large. Please record a shorter video.", Toast.LENGTH_LONG).show()
+                        }
+                        422 -> {
+                            Toast.makeText(context, "Wrong video format. Please try recording again.", Toast.LENGTH_LONG).show()
+                        }
+                        500, 502, 503 -> {
+                            Toast.makeText(context, "Server error. Please try again later.", Toast.LENGTH_LONG).show()
+                        }
+                        else -> {
+                            Toast.makeText(context, "Upload failed with error ${e.code()}. Please try again later.", Toast.LENGTH_LONG).show()
+                        }
                     }
-                    break // NEVER retry HTTP errors
                 } catch (e: java.net.SocketTimeoutException) {
+                    // Connection timeout - can retry
                     retryCount++
                     if (retryCount < maxRetries) {
                         Toast.makeText(context, "Upload timeout. Retrying... ($retryCount/$maxRetries)", Toast.LENGTH_SHORT).show()
-                        kotlinx.coroutines.delay(3000) // Longer delay for video uploads
+                        kotlinx.coroutines.delay(3000)
                     } else {
-                        Toast.makeText(context, "Upload timeout. Please check your internet connection.", Toast.LENGTH_LONG).show()
+                        Toast.makeText(context, "Upload error, check your internet connection.", Toast.LENGTH_LONG).show()
+                        shouldRetry = false
+                    }
+                } catch (e: java.net.ConnectException) {
+                    // Connection refused - can retry
+                    retryCount++
+                    if (retryCount < maxRetries) {
+                        Toast.makeText(context, "Connection failed. Retrying... ($retryCount/$maxRetries)", Toast.LENGTH_SHORT).show()
+                        kotlinx.coroutines.delay(3000)
+                    } else {
+                        Toast.makeText(context, "Upload error, check your internet connection.", Toast.LENGTH_LONG).show()
+                        shouldRetry = false
+                    }
+                } catch (e: java.net.UnknownHostException) {
+                    // DNS/Host resolution failed - can retry
+                    retryCount++
+                    if (retryCount < maxRetries) {
+                        Toast.makeText(context, "Network error. Retrying... ($retryCount/$maxRetries)", Toast.LENGTH_SHORT).show()
+                        kotlinx.coroutines.delay(3000)
+                    } else {
+                        Toast.makeText(context, "Upload error, check your internet connection.", Toast.LENGTH_LONG).show()
+                        shouldRetry = false
                     }
                 } catch (e: java.io.IOException) {
-                    // Only retry on actual connection/stream issues 
-                    if (e.message?.contains("unexpected end of stream") == true || 
-                        e.message?.contains("Connection reset") == true ||
-                        e.message?.contains("Network is unreachable") == true) {
+                    // Check if it's a retryable connection issue
+                    val isRetryableError = e.message?.let { msg ->
+                        msg.contains("unexpected end of stream", ignoreCase = true) ||
+                        msg.contains("connection reset", ignoreCase = true) ||
+                        msg.contains("network is unreachable", ignoreCase = true) ||
+                        msg.contains("connection refused", ignoreCase = true) ||
+                        msg.contains("timeout", ignoreCase = true)
+                    } ?: false
+                    
+                    if (isRetryableError) {
                         retryCount++
                         if (retryCount < maxRetries) {
-                            Toast.makeText(context, "Connection interrupted. Retrying upload... ($retryCount/$maxRetries)", Toast.LENGTH_SHORT).show()
+                            Toast.makeText(context, "Connection interrupted. Retrying... ($retryCount/$maxRetries)", Toast.LENGTH_SHORT).show()
                             kotlinx.coroutines.delay(3000)
                         } else {
-                            Toast.makeText(context, "Upload failed. Please check your internet connection.", Toast.LENGTH_LONG).show()
+                            Toast.makeText(context, "Upload error, check your internet connection.", Toast.LENGTH_LONG).show()
+                            shouldRetry = false
                         }
                     } else {
+                        // Non-retryable IO error
                         Toast.makeText(context, "Upload error: ${e.message}", Toast.LENGTH_LONG).show()
-                        break
+                        shouldRetry = false
                     }
                 } catch (e: Exception) {
+                    // Unexpected errors - don't retry
                     Toast.makeText(context, "Upload failed: ${e.message}", Toast.LENGTH_SHORT).show()
-                    break
+                    shouldRetry = false
                 }
             }
             
